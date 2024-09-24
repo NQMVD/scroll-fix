@@ -1,52 +1,56 @@
-use input::{event::keyboard::Keycode, event::mouse::MouseButton, event::Event, event::EventStream, event::EventType, event::MouseScrollDelta, event::RelMotion};
-use std::ptr;
-use x11::xlib::{XCloseDisplay, XOpenDisplay, XQueryPointer, XSendEvent, XDefaultRootWindow, Display, KeyPressMask, ButtonPressMask, ButtonReleaseMask, MotionNotify, ButtonPress, ButtonRelease, XFlush, XSync, XEvent, XAnyEvent};
+use enigo::*;
+use rdev::{listen, Event, EventType};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const RESET_THRESHOLD: Duration = Duration::from_millis(500);
 
 fn main() {
-    let mut event_stream = EventStream::new().expect("Failed to create event stream");
+    let mut enigo = Enigo::new(&Settings::default()).unwrap();
+    let last_direction = Arc::new(AtomicBool::new(true)); // true = up, false = down
+    let last_scroll_time = Arc::new(AtomicU64::new(0));
 
-    let display = unsafe { XOpenDisplay(ptr::null()) };
-    if display.is_null() {
-        eprintln!("Unable to open X display");
-        return;
-    }
+    let callback = move |event: Event| {
+        match event.event_type {
+            EventType::Wheel { delta_x, delta_y } => {
+                let current_time = Instant::now();
+                let current_direction = delta_y > 0;
+                let last_time = Instant::now()
+                    .checked_sub(Duration::from_nanos(
+                        last_scroll_time.load(Ordering::SeqCst),
+                    ))
+                    .unwrap_or(Instant::now());
 
-    let root = unsafe { XDefaultRootWindow(display) };
+                // if !current_direction {
+                //     return;
+                // }
 
-    for event in event_stream.iter() {
-        match event {
-            Ok(Event::MouseScroll(MouseScrollDelta::LineDelta(_, dy))) => {
-                correct_scroll_event(display, root, dy);
+                // println!(
+                //     "current_time: {:?}, last_time: {:?}, current_direction: {}, last_direction: {}",
+                //     current_time,
+                //     last_time,
+                //     current_direction,
+                //     last_direction.load(Ordering::SeqCst)
+                // );
+
+                if current_time.duration_since(last_time) > RESET_THRESHOLD {
+                    // Reset direction if inactive for the threshold duration
+                    last_direction.store(current_direction, Ordering::SeqCst);
+                } else if current_direction != last_direction.load(Ordering::SeqCst) {
+                    // Corrected scroll event
+                    enigo
+                        .scroll(if current_direction { 1 } else { -1 }, Axis::Vertical)
+                        .expect("Could not scroll");
+                }
+
+                last_scroll_time.store(current_time.elapsed().as_nanos() as u64, Ordering::SeqCst);
             }
-            _ => {}
+            _ => (),
         }
-    }
-
-    unsafe { XCloseDisplay(display) };
-}
-
-fn correct_scroll_event(display: *mut Display, root: u64, dy: f64) {
-    static mut LAST_DY: f64 = 0.0;
-
-    unsafe {
-        if (dy - LAST_DY).abs() > 5.0 {
-            dy = LAST_DY;
-        }
-        LAST_DY = dy;
-    }
-
-    let mut event = XEvent {
-        xany: XAnyEvent {
-            type: MotionNotify,
-            serial: 0,
-            send_event: 0,
-            display: display,
-            window: root,
-        },
     };
 
-    unsafe {
-        XSendEvent(display, root, 0, ButtonPressMask, &mut event);
-        XFlush(display);
+    if let Err(error) = listen(callback) {
+        println!("Error: {:?}", error);
     }
 }
